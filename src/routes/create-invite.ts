@@ -8,46 +8,40 @@ import { dayjs } from '../lib/dayjs';
 import { getEmailClient } from '../lib/mail';
 import { prisma } from '../lib/prisma';
 
-export async function confirmTrip(app: FastifyInstance) {
-  app.withTypeProvider<ZodTypeProvider>().get(
-    '/trips/:tripId/confirm',
+export async function createInvite(app: FastifyInstance) {
+  app.withTypeProvider<ZodTypeProvider>().post(
+    '/trips/:tripId/invites',
     {
       schema: {
         params: z.object({
           tripId: z.string().uuid(),
         }),
+        body: z.object({
+          email: z.string().email(),
+        }),
       },
     },
-    async (request, reply) => {
+    async (request) => {
       const { tripId } = request.params;
+      const { email } = request.body;
 
       const trip = await prisma.trip.findUnique({
         where: {
           id: tripId,
-        },
-        include: {
-          participants: {
-            where: {
-              is_owner: false,
-            },
-          },
         },
       });
 
       if (!trip) {
         throw new ClientError('Trip not found');
       }
-
-      if (trip.is_confirmed) {
-        return reply.redirect(`${env.WEB_BASE_URL}/trips/${tripId}`);
+      if (!trip.is_confirmed) {
+        throw new ClientError('Trip owner has not confirmed the trip');
       }
 
-      await prisma.trip.update({
-        where: {
-          id: tripId,
-        },
+      const participant = await prisma.participant.create({
         data: {
-          is_confirmed: true,
+          email,
+          trip_id: tripId,
         },
       });
 
@@ -56,18 +50,16 @@ export async function confirmTrip(app: FastifyInstance) {
 
       const mail = await getEmailClient();
 
-      await Promise.all(
-        trip.participants.map(async (participant) => {
-          const confirmationLink = `${env.API_BASE_URL}/participants/${participant.id}/confirm`;
+      const confirmationLink = `${env.API_BASE_URL}/participants/${participant.id}/confirm`;
 
-          const mailMessage = await mail.sendMail({
-            from: {
-              name: 'Equipe plann.er',
-              address: 'noreply@plann.er',
-            },
-            to: participant.email,
-            subject: `Confirme sua viagem para ${trip.destination} em ${formattedStartDate}`,
-            html: `
+      const mailMessage = await mail.sendMail({
+        from: {
+          name: 'Equipe plann.er',
+          address: 'noreply@plann.er',
+        },
+        to: participant.email,
+        subject: `Confirme sua viagem para ${trip.destination} em ${formattedStartDate}`,
+        html: `
               <div style="font-family: sans-serif; font-size: 16px; line-height: 1.6">
                 <p>
                   Você foi convidado(a) para participar de uma viagem para <strong>${trip.destination}</strong>,
@@ -83,15 +75,11 @@ export async function confirmTrip(app: FastifyInstance) {
                 <p>Caso você não saiba do que se trata esse e-mail ou não poderá estar presente, apenas ignore esse e-mail.</p>
               </div>
             `.trim(),
-          });
-          console.log(
-            'Mail sent to:',
-            nodemailer.getTestMessageUrl(mailMessage)
-          );
-        })
-      );
+      });
 
-      return reply.redirect(`${env.WEB_BASE_URL}/trips/${tripId}`);
+      console.log('Mail sent to:', nodemailer.getTestMessageUrl(mailMessage));
+
+      return { participantId: participant.id };
     }
   );
 }
